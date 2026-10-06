@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Universal Cat Printer Camera</title>
+    <title>Tiny Print X6H Cam</title>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -61,11 +61,11 @@
 </head>
 <body>
 
-    <h1>Print Cam v4</h1>
+    <h1>Tiny Print X6H Cam 🐱</h1>
     <div id="status">Status: Disconnected</div>
     <br>
 
-    <button id="btBtn" onclick="connectPrinter()">Select & Connect Printer</button>
+    <button id="btBtn" onclick="connectPrinter()">Scan & Connect Printer</button>
 
     <div class="camera-container">
         <video id="video" autoplay playsinline></video>
@@ -78,7 +78,6 @@
         let bluetoothDevice;
         let pCharacteristic;
 
-        // 1. Initialize Camera Feed
         async function initCamera() {
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ 
@@ -91,22 +90,20 @@
         }
         initCamera();
 
-        // 2. Universal Connection Handler (Checks all known printer profile services)
         async function connectPrinter() {
             try {
-                document.getElementById('status').innerText = "Scanning for printers...";
+                document.getElementById('status').innerText = "Scanning for printer...";
                 
                 bluetoothDevice = await navigator.bluetooth.requestDevice({
                     acceptAllDevices: true,
                     optionalServices: [
-                        '0000ff00-0000-1000-8000-00805f9b34fb', // Standard Cat Printer / MXW01
-                        '49535343-fe7d-4ae5-8fa9-9fafd205e455', // ISSC Transparent UART
-                        '0000ae30-0000-1000-8000-00805f9b34fb', // X6H / Tiny Print Service
-                        '000018f0-0000-1000-8000-00805f9b34fb'  // Generic POS Printer Service
+                        '0000ae30-0000-1000-8000-00805f9b34fb',
+                        '0000ff00-0000-1000-8000-00805f9b34fb',
+                        '49535343-fe7d-4ae5-8fa9-9fafd205e455'
                     ]
                 });
 
-                document.getElementById('status').innerText = `Connecting to ${bluetoothDevice.name || 'Printer'}...`;
+                document.getElementById('status').innerText = "Connecting to device...";
                 const server = await bluetoothDevice.gatt.connect();
                 
                 const services = await server.getPrimaryServices();
@@ -126,7 +123,7 @@
                     document.getElementById('printBtn').disabled = false;
                     document.getElementById('btBtn').innerText = "Connected ✅";
                 } else {
-                    document.getElementById('status').innerText = "Connected, but no writable channel found.";
+                    document.getElementById('status').innerText = "No writable channel found.";
                 }
 
             } catch (err) {
@@ -134,8 +131,8 @@
             }
         }
 
-        // Standard Universal Packet Builder Frame
-        function buildPacket(command, payload) {
+        // X6H Packet Construction Frame
+        fnBuildPacket = function(command, payload) {
             let pkt = [0x51, 0x78, command, 0x00];
             let len = payload.length;
             pkt.push(len & 0xFF, (len >> 8) & 0xFF);
@@ -143,7 +140,6 @@
             return new Uint8Array(pkt);
         }
 
-        // 3. Image Capture & Printing Pipeline
         async function snapAndPrint() {
             if (!pCharacteristic) return;
             
@@ -151,7 +147,7 @@
             const canvas = document.getElementById('canvas');
             const ctx = canvas.getContext('2d');
 
-            const targetWidth = 384; 
+            const targetWidth = 384; // Exact thermal paper width in pixels
             const scale = targetWidth / video.videoWidth;
             const targetHeight = Math.floor(video.videoHeight * scale);
 
@@ -164,10 +160,10 @@
 
             document.getElementById('status').innerText = "Processing image...";
 
-            let bytesPerLine = Math.ceil(targetWidth / 8);
+            let bytesPerLine = Math.ceil(targetWidth / 8); // 48 bytes per line
             let scanlines = [];
 
-            // Convert to clean high-contrast monochrome pixels
+            // Convert pixels into binary bitmaps using strict MSB-first encoding required by X6H thermal heads
             for (let y = 0; y < targetHeight; y++) {
                 let rowBytes = new Uint8Array(bytesPerLine);
                 for (let xByte = 0; xByte < bytesPerLine; xByte++) {
@@ -176,9 +172,10 @@
                         let pxX = xByte * 8 + bit;
                         if (pxX < targetWidth) {
                             let offset = (y * targetWidth + pxX) * 4;
-                            let gray = 0.299 * data[offset] + 0.587 * data[offset + 1] + 0.114 * data[offset + 2];
-                            if (gray < 130) {
-                                byte |= (1 << (7 - bit));
+                            let gray = (data[offset] * 0.299 + data[offset + 1] + 0.587 + data[offset + 2] * 0.114);
+                            // Threshold: pixels darker than 135 trigger black thermal dots
+                            if (gray < 135) {
+                                byte |= (1 << (7 - bit)); // MSB-first bitwise placement
                             }
                         }
                     }
@@ -188,21 +185,25 @@
             }
 
             try {
-                document.getElementById('status').innerText = "Initializing print head...";
+                document.getElementById('status').innerText = "Initializing printhead...";
                 
-                // Send standard open-source initialization payload sequence
-                await pCharacteristic.writeValue(buildPacket(0xA4, [0x35]));
-                await new Promise(r => setTimeout(r, 30));
-                await pCharacteristic.writeValue(buildPacket(0xAF, [0x00, 0x60]));
-                await new Promise(r => setTimeout(r, 30));
-                await pCharacteristic.writeValue(buildPacket(0xBE, [0x00]));
-                await new Promise(r => setTimeout(r, 50));
+                // 1. High-quality print head parameters configuration
+                await pCharacteristic.writeValue(fnBuildPacket(0xA4, [0x35]));
+                await new Promise(r => setTimeout(r, 40));
+                
+                // 2. High thermal energy level (forces dark clear printing)
+                await pCharacteristic.writeValue(fnBuildPacket(0xAF, [0x00, 0x80]));
+                await new Promise(r => setTimeout(r, 40));
+                
+                // 3. Start print sequence instruction
+                await pCharacteristic.writeValue(fnBuildPacket(0xBE, [0x00]));
+                await new Promise(r => setTimeout(r, 60));
 
-                document.getElementById('status').innerText = "Sending image lines...";
+                document.getElementById('status').innerText = `Printing image (${targetHeight} lines)...`;
 
-                // Stream scanlines with safe chunk pacing
+                // 4. Send every scanline using command 0xA2 with precise hardware buffering pauses
                 for (let i = 0; i < scanlines.length; i++) {
-                    let packet = buildPacket(0xA2, Array.from(scanlines[i]));
+                    let packet = fnBuildPacket(0xA2, Array.from(scanlines[i]));
                     
                     if (pCharacteristic.properties.writeWithoutResponse) {
                         await pCharacteristic.writeValueWithoutResponse(packet);
@@ -210,17 +211,18 @@
                         await pCharacteristic.writeValue(packet);
                     }
 
-                    // Pacing delay to avoid buffer choke
-                    await new Promise(r => setTimeout(r, 10));
+                    // 15ms stable delay per line prevents internal queue overflow
+                    await new Promise(r => setTimeout(r, 15));
 
-                    if (i % 40 === 0) {
+                    if (i % 30 === 0) {
                         document.getElementById('status').innerText = `Printing line ${i}/${targetHeight}...`;
                     }
                 }
 
-                // Final paper feed command to push paper out
+                // 5. Final blank paper feed command sequence to push the print out completely
+                document.getElementById('status').innerText = "Finishing up...";
                 await new Promise(r => setTimeout(r, 100));
-                await pCharacteristic.writeValue(buildPacket(0xBD, [0x40, 0x00]));
+                await pCharacteristic.writeValue(fnBuildPacket(0xBD, [0x80, 0x02])); // Feed paper instruction
 
                 document.getElementById('status').innerText = "Print complete! 🎉";
             } catch (err) {
