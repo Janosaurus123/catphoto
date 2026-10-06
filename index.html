@@ -1,226 +1,181 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TinyPrint X6H Universal Cam</title>
-    <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            background: #f4f4f9;
-            color: #333;
-            text-align: center;
-            padding: 20px;
-            margin: 0;
-        }
-        h1 { font-size: 1.4rem; margin-bottom: 5px; }
-        #status {
-            font-size: 0.85rem;
-            color: #444;
-            margin-bottom: 15px;
-            padding: 8px 12px;
-            background: #e2e2e8;
-            border-radius: 8px;
-            display: inline-block;
-            max-width: 90%;
-            word-break: break-all;
-        }
-        .camera-container {
-            position: relative;
-            width: 100%;
-            max-width: 384px;
-            margin: 0 auto 15px auto;
-            background: #000;
-            border-radius: 12px;
-            overflow: hidden;
-            box-shadow: 0 4px 10px rgba(0,0,0,0.1);
-        }
-        video, canvas {
-            width: 100%;
-            height: auto;
-            display: block;
-        }
-        canvas { display: none; }
-        button {
-            width: 100%;
-            max-width: 384px;
-            background: #ff6b81;
-            color: white;
-            border: none;
-            padding: 14px;
-            font-size: 1rem;
-            font-weight: bold;
-            border-radius: 12px;
-            cursor: pointer;
-            margin-bottom: 10px;
-            box-shadow: 0 4px 6px rgba(255,107,129,0.3);
-        }
-        button#btBtn { background: #4a90e2; box-shadow: 0 4px 6px rgba(74,144,226,0.3); }
-        button:disabled { background: #ccc; box-shadow: none; }
-    </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Cat Cam Printer</title>
+<style>
+  :root{--bg:#1e2227;--panel:#2a3037;--ink:#f2f4f6;--mute:#9aa4af;--hot:#ff4f8b;--ok:#5ad19a}
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,system-ui,sans-serif}
+  body{display:flex;flex-direction:column;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+  #stage{flex:1;min-height:0;position:relative;display:flex;align-items:center;justify-content:center;background:#000}
+  video,canvas#shot{max-width:100%;max-height:100%;width:100%;height:100%;object-fit:contain}
+  canvas#shot{display:none;background:#fff;image-rendering:pixelated}
+  #status{padding:10px 16px;font-size:14px;color:var(--mute);min-height:40px;background:var(--panel)}
+  #status.ok{color:var(--ok)} #status.err{color:var(--hot)}
+  #bar{display:flex;gap:12px;align-items:center;justify-content:space-between;padding:14px 16px 18px;background:var(--panel)}
+  button{font:inherit;color:var(--ink);background:#3a424b;border:0;border-radius:14px;padding:14px 16px;min-width:76px}
+  button:disabled{opacity:.4}
+  button:focus-visible{outline:3px solid var(--hot);outline-offset:2px}
+  #snap{width:76px;height:76px;min-width:0;border-radius:50%;background:var(--ink);border:6px solid #3a424b;padding:0}
+  #print{background:var(--hot);color:#fff;font-weight:600}
+  .hide{display:none!important}
+</style>
 </head>
 <body>
+<div id="stage">
+  <video id="cam" autoplay playsinline muted></video>
+  <canvas id="shot"></canvas>
+</div>
+<div id="status">Tap Connect to pair your cat printer.</div>
+<div id="bar">
+  <button id="conn">Connect</button>
+  <button id="snap" aria-label="Take photo"></button>
+  <button id="flip">Flip</button>
+  <button id="retake" class="hide">Retake</button>
+  <button id="print" class="hide" disabled>Print</button>
+</div>
 
-    <h1>TinyPrint X6H Cam 🐱</h1>
-    <div id="status">Status: Disconnected</div>
-    <br>
+<script>
+const $ = id => document.getElementById(id);
+const cam = $('cam'), shot = $('shot'), statusEl = $('status');
+const PRINT_W = 384;               // dots per line (48 bytes) on most cat printers
+const SERVICE = 0xAE30, CHAR = 0xAE01;
+let facing = 'environment', stream = null, device = null, writeChar = null, bitmap = null;
 
-    <button id="btBtn" onclick="connectPrinter()">Select X6H Printer</button>
+function say(msg, cls=''){ statusEl.textContent = msg; statusEl.className = cls; }
 
-    <div class="camera-container">
-        <video id="video" autoplay playsinline></video>
-    </div>
+/* ---------- Camera ---------- */
+async function startCam(){
+  try{
+    if(stream) stream.getTracks().forEach(t=>t.stop());
+    stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:facing,width:{ideal:1280}},audio:false});
+    cam.srcObject = stream;
+  }catch(e){ say('Camera blocked: allow camera access for this site in browser settings.','err'); }
+}
 
-    <button id="printBtn" onclick="snapAndPrint()" disabled>Snap & Print Photo</button>
-    <canvas id="canvas"></canvas>
+$('flip').onclick = () => { facing = facing==='environment' ? 'user' : 'environment'; startCam(); };
 
-    <script>
-        let bluetoothDevice;
-        let pCharacteristic;
+$('snap').onclick = () => {
+  const vw = cam.videoWidth, vh = cam.videoHeight;
+  if(!vw){ say('Camera is not ready yet.','err'); return; }
+  const h = Math.round(PRINT_W * vh / vw);
+  const c = document.createElement('canvas'); c.width = PRINT_W; c.height = h;
+  const x = c.getContext('2d'); x.drawImage(cam,0,0,PRINT_W,h);
+  bitmap = dither(x.getImageData(0,0,PRINT_W,h));
+  shot.width = PRINT_W; shot.height = h;
+  shot.getContext('2d').putImageData(toImage(bitmap,h),0,0);
+  cam.style.display='none'; shot.style.display='block';
+  $('snap').classList.add('hide'); $('flip').classList.add('hide');
+  $('retake').classList.remove('hide'); $('print').classList.remove('hide');
+  $('print').disabled = !writeChar;
+  say(writeChar ? 'Ready to print.' : 'Connect a printer to print.');
+};
 
-        // Initialize Camera
-        async function initCamera() {
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({ 
-                    video: { facingMode: 'environment', width: { ideal: 384 } } 
-                });
-                document.getElementById('video').srcObject = stream;
-            } catch (err) {
-                document.getElementById('status').innerText = "Camera access denied.";
-            }
-        }
-        initCamera();
+$('retake').onclick = () => {
+  bitmap = null; shot.style.display='none'; cam.style.display='block';
+  $('snap').classList.remove('hide'); $('flip').classList.remove('hide');
+  $('retake').classList.add('hide'); $('print').classList.add('hide');
+  say(writeChar ? 'Printer connected.' : 'Tap Connect to pair your cat printer.', writeChar?'ok':'');
+};
 
-        // Connect using acceptAllDevices so X6H-CDD0 always appears in the list
-        async function connectPrinter() {
-            try {
-                document.getElementById('status').innerText = "Opening Bluetooth menu...";
-                
-                bluetoothDevice = await navigator.bluetooth.requestDevice({
-                    acceptAllDevices: true,
-                    optionalServices: [
-                        '0000ae30-0000-1000-8000-00805f9b34fb',
-                        '0000ff00-0000-1000-8000-00805f9b34fb',
-                        '49535343-fe7d-4ae5-8fa9-9fafd205e455',
-                        '000018f0-0000-1000-8000-00805f9b34fb'
-                    ]
-                });
+/* ---------- Image to 1-bit (Floyd-Steinberg with auto-contrast) ---------- */
+function dither(img){
+  const w = img.width, h = img.height, g = new Float32Array(w*h);
+  let lo = 255, hi = 0;
+  for(let i=0;i<w*h;i++){
+    const v = 0.299*img.data[i*4] + 0.587*img.data[i*4+1] + 0.114*img.data[i*4+2];
+    g[i] = v; if(v<lo) lo=v; if(v>hi) hi=v;
+  }
+  const span = Math.max(hi-lo,1);
+  for(let i=0;i<g.length;i++) g[i] = (g[i]-lo)/span*255;
+  const out = new Uint8Array(w*h); // 1 = black
+  for(let y=0;y<h;y++) for(let x=0;x<w;x++){
+    const i = y*w+x, old = g[i], nw = old<128 ? 0 : 255, err = old-nw;
+    out[i] = nw===0 ? 1 : 0;
+    if(x+1<w) g[i+1] += err*7/16;
+    if(y+1<h){
+      if(x>0) g[i+w-1] += err*3/16;
+      g[i+w] += err*5/16;
+      if(x+1<w) g[i+w+1] += err*1/16;
+    }
+  }
+  return out;
+}
+function toImage(bits,h){
+  const d = new ImageData(PRINT_W,h);
+  for(let i=0;i<bits.length;i++){ const v = bits[i]?0:255; d.data.set([v,v,v,255],i*4); }
+  return d;
+}
 
-                document.getElementById('status').innerText = `Connecting to ${bluetoothDevice.name || 'Printer'}...`;
-                const server = await bluetoothDevice.gatt.connect();
-                
-                const services = await server.getPrimaryServices();
-                for (const service of services) {
-                    const characteristics = await service.getCharacteristics();
-                    for (const char of characteristics) {
-                        if (char.properties.write || char.properties.writeWithoutResponse) {
-                            pCharacteristic = char;
-                            break;
-                        }
-                    }
-                    if (pCharacteristic) break;
-                }
+/* ---------- Cat printer protocol ---------- */
+function crc8(data){
+  let c = 0;
+  for(const b of data){ c ^= b; for(let i=0;i<8;i++) c = (c & 0x80) ? ((c<<1)^0x07)&0xFF : (c<<1)&0xFF; }
+  return c;
+}
+function packet(cmd, data){
+  data = Array.from(data);
+  return [0x51,0x78,cmd,0x00,data.length&0xFF,data.length>>8,...data,crc8(data),0xFF];
+}
+function buildJob(bits,h){
+  const out = [];
+  const add = (cmd,data) => out.push(...packet(cmd,data));
+  add(0xA3,[0x00]);                                            // device state
+  add(0xA4,[0x32]);                                            // quality
+  add(0xA6,[0xAA,0x55,0x17,0x38,0x44,0x5F,0x5F,0x5F,0x44,0x38,0x2C]); // lattice start
+  add(0xAF,[0xE0,0x2E]);                                       // energy (darkness)
+  add(0xBE,[0x00]);                                            // image mode
+  add(0xBD,[0x20]);                                            // speed
+  for(let y=0;y<h;y++){
+    const row = new Array(PRINT_W/8).fill(0);
+    for(let x=0;x<PRINT_W;x++) if(bits[y*PRINT_W+x]) row[x>>3] |= 1<<(x&7);  // LSB first
+    add(0xA2,row);
+  }
+  add(0xA1,[0x60,0x00]);                                       // feed paper
+  add(0xA6,[0xAA,0x55,0x17,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x17]); // lattice end
+  add(0xA3,[0x00]);
+  return Uint8Array.from(out);
+}
+const sleep = ms => new Promise(r=>setTimeout(r,ms));
 
-                if (pCharacteristic) {
-                    document.getElementById('status').innerText = "Connected! Ready ✅";
-                    document.getElementById('printBtn').disabled = false;
-                    document.getElementById('btBtn').innerText = "Connected ✅";
-                } else {
-                    document.getElementById('status').innerText = "Connected, but no writable channel found.";
-                }
+$('conn').onclick = async () => {
+  if(!navigator.bluetooth){
+    say('This browser has no Bluetooth. On iPhone, open this page in the Bluefy browser.','err'); return;
+  }
+  try{
+    say('Choose your printer…');
+    device = await navigator.bluetooth.requestDevice({acceptAllDevices:true,optionalServices:[SERVICE,0xAF30,0xFF00]});
+    device.addEventListener('gattserverdisconnected',()=>{
+      writeChar=null; $('print').disabled=true; $('conn').textContent='Connect'; say('Printer disconnected. Tap Connect.','err');
+    });
+    const server = await device.gatt.connect();
+    const svc = await server.getPrimaryService(SERVICE);
+    writeChar = await svc.getCharacteristic(CHAR);
+    $('conn').textContent = 'Connected';
+    $('print').disabled = !bitmap;
+    say('Connected to ' + (device.name||'printer') + '.','ok');
+  }catch(e){ say('Could not connect: ' + e.message,'err'); }
+};
 
-            } catch (err) {
-                document.getElementById('status').innerText = "Connection error: " + err.message;
-            }
-        }
+$('print').onclick = async () => {
+  if(!writeChar || !bitmap) return;
+  $('print').disabled = true;
+  try{
+    const job = buildJob(bitmap, bitmap.length/PRINT_W);
+    const CHUNK = 100;
+    for(let i=0;i<job.length;i+=CHUNK){
+      await writeChar.writeValueWithoutResponse(job.slice(i,i+CHUNK));
+      await sleep(20);
+      if(i % 4000 < CHUNK) say('Printing… ' + Math.round(i/job.length*100) + '%');
+    }
+    say('Printed.','ok');
+  }catch(e){ say('Print failed: ' + e.message,'err'); }
+  $('print').disabled = false;
+};
 
-        // X6H Packet Constructor
-        function buildPacket(command, payload) {
-            let pkt = [0x51, 0x78, command, 0x00];
-            let len = payload.length;
-            pkt.push(len & 0xFF, (len >> 8) & 0xFF);
-            pkt.push(...payload);
-            return new Uint8Array(pkt);
-        }
-
-        async function snapAndPrint() {
-            if (!pCharacteristic) return;
-            
-            const video = document.getElementById('video');
-            const canvas = document.getElementById('canvas');
-            const ctx = canvas.getContext('2d');
-
-            const targetWidth = 384; // 48 bytes per line
-            const scale = targetWidth / video.videoWidth;
-            const targetHeight = Math.floor(video.videoHeight * scale);
-
-            canvas.width = targetWidth;
-            canvas.height = targetHeight;
-            ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
-            
-            const imgData = ctx.getImageData(0, 0, targetWidth, targetHeight);
-            const data = imgData.data;
-
-            document.getElementById('status').innerText = "Processing image...";
-
-            let bytesPerLine = Math.ceil(targetWidth / 8);
-            let scanlines = [];
-
-            for (let y = 0; y < targetHeight; y++) {
-                let rowBytes = new Uint8Array(bytesPerLine);
-                for (let xByte = 0; xByte < bytesPerLine; xByte++) {
-                    let byte = 0;
-                    for (let bit = 0; bit < 8; bit++) {
-                        let pxX = xByte * 8 + bit;
-                        if (pxX < targetWidth) {
-                            let offset = (y * targetWidth + pxX) * 4;
-                            let gray = 0.299 * data[offset] + 0.587 * data[offset + 1] + 0.114 * data[offset + 2];
-                            if (gray < 135) {
-                                byte |= (1 << (7 - bit));
-                            }
-                        }
-                    }
-                    rowBytes[xByte] = byte;
-                }
-                scanlines.push(rowBytes);
-            }
-
-            try {
-                document.getElementById('status').innerText = "Initializing print head...";
-                
-                await pCharacteristic.writeValue(buildPacket(0xA4, [0x35]));
-                await new Promise(r => setTimeout(r, 30));
-                await pCharacteristic.writeValue(buildPacket(0xAF, [0x00, 0x90]));
-                await new Promise(r => setTimeout(r, 30));
-                await pCharacteristic.writeValue(buildPacket(0xBE, [0x00]));
-                await new Promise(r => setTimeout(r, 50));
-
-                document.getElementById('status').innerText = "Sending image lines...";
-
-                for (let i = 0; i < scanlines.length; i++) {
-                    let packet = buildPacket(0xA2, Array.from(scanlines[i]));
-                    
-                    if (pCharacteristic.properties.writeWithoutResponse) {
-                        await pCharacteristic.writeValueWithoutResponse(packet);
-                    } else {
-                        await pCharacteristic.writeValue(packet);
-                    }
-
-                    await new Promise(r => setTimeout(r, 12));
-
-                    if (i % 40 === 0) {
-                        document.getElementById('status').innerText = `Printing line ${i}/${targetHeight}...`;
-                    }
-                }
-
-                await new Promise(r => setTimeout(r, 100));
-                await pCharacteristic.writeValue(buildPacket(0xBD, [0x60, 0x00]));
-
-                document.getElementById('status').innerText = "Print complete! 🎉";
-            } catch (err) {
-                document.getElementById('status').innerText = "Print error: " + err.message;
-            }
-        }
-    </script>
+startCam();
+</script>
 </body>
 </html>
