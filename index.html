@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cat Printer Official SDK Cam</title>
+    <title>TinyPrint X6H Universal Cam</title>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -61,11 +61,11 @@
 </head>
 <body>
 
-    <h1>Cat Printer SDK Cam 🐱</h1>
+    <h1>TinyPrint X6H Cam 🐱</h1>
     <div id="status">Status: Disconnected</div>
     <br>
 
-    <button id="btBtn" onclick="connectPrinter()">Connect via Official SDK</button>
+    <button id="btBtn" onclick="connectPrinter()">Select X6H Printer</button>
 
     <div class="camera-container">
         <video id="video" autoplay playsinline></video>
@@ -74,13 +74,11 @@
     <button id="printBtn" onclick="snapAndPrint()" disabled>Snap & Print Photo</button>
     <canvas id="canvas"></canvas>
 
-    <script type="module">
-        // Import the official opuu/cat-printer library directly via CDN
-        import { CatPrinter } from 'https://cdn.jsdelivr.net/npm/@opuu/cat-printer/+esm';
+    <script>
+        let bluetoothDevice;
+        let pCharacteristic;
 
-        let printer = new CatPrinter();
-
-        // 1. Initialize Camera Feed
+        // Initialize Camera
         async function initCamera() {
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ 
@@ -93,29 +91,66 @@
         }
         initCamera();
 
-        // 2. Connect using the library's built-in device discovery
-        window.connectPrinter = async function() {
+        // Connect using acceptAllDevices so X6H-CDD0 always appears in the list
+        async function connectPrinter() {
             try {
-                document.getElementById('status').innerText = "Requesting Bluetooth Device (SDK)...";
-                await printer.connect();
+                document.getElementById('status').innerText = "Opening Bluetooth menu...";
                 
-                document.getElementById('status').innerText = "Connected! Ready to print ✅";
-                document.getElementById('printBtn').disabled = false;
-                document.getElementById('btBtn').innerText = "Connected ✅";
+                bluetoothDevice = await navigator.bluetooth.requestDevice({
+                    acceptAllDevices: true,
+                    optionalServices: [
+                        '0000ae30-0000-1000-8000-00805f9b34fb',
+                        '0000ff00-0000-1000-8000-00805f9b34fb',
+                        '49535343-fe7d-4ae5-8fa9-9fafd205e455',
+                        '000018f0-0000-1000-8000-00805f9b34fb'
+                    ]
+                });
+
+                document.getElementById('status').innerText = `Connecting to ${bluetoothDevice.name || 'Printer'}...`;
+                const server = await bluetoothDevice.gatt.connect();
+                
+                const services = await server.getPrimaryServices();
+                for (const service of services) {
+                    const characteristics = await service.getCharacteristics();
+                    for (const char of characteristics) {
+                        if (char.properties.write || char.properties.writeWithoutResponse) {
+                            pCharacteristic = char;
+                            break;
+                        }
+                    }
+                    if (pCharacteristic) break;
+                }
+
+                if (pCharacteristic) {
+                    document.getElementById('status').innerText = "Connected! Ready ✅";
+                    document.getElementById('printBtn').disabled = false;
+                    document.getElementById('btBtn').innerText = "Connected ✅";
+                } else {
+                    document.getElementById('status').innerText = "Connected, but no writable channel found.";
+                }
+
             } catch (err) {
                 document.getElementById('status').innerText = "Connection error: " + err.message;
             }
-        };
+        }
 
-        // 3. Capture frame and use SDK's native image processor & print pipeline
-        window.snapAndPrint = async function() {
-            if (!printer.isConnected()) return;
+        // X6H Packet Constructor
+        function buildPacket(command, payload) {
+            let pkt = [0x51, 0x78, command, 0x00];
+            let len = payload.length;
+            pkt.push(len & 0xFF, (len >> 8) & 0xFF);
+            pkt.push(...payload);
+            return new Uint8Array(pkt);
+        }
+
+        async function snapAndPrint() {
+            if (!pCharacteristic) return;
             
             const video = document.getElementById('video');
             const canvas = document.getElementById('canvas');
             const ctx = canvas.getContext('2d');
 
-            const targetWidth = 384; 
+            const targetWidth = 384; // 48 bytes per line
             const scale = targetWidth / video.videoWidth;
             const targetHeight = Math.floor(video.videoHeight * scale);
 
@@ -123,26 +158,69 @@
             canvas.height = targetHeight;
             ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
             
-            // Convert canvas stream into image URL for the SDK
-            const imageUrl = canvas.toDataURL('image/png');
+            const imgData = ctx.getImageData(0, 0, targetWidth, targetHeight);
+            const data = imgData.data;
+
+            document.getElementById('status').innerText = "Processing image...";
+
+            let bytesPerLine = Math.ceil(targetWidth / 8);
+            let scanlines = [];
+
+            for (let y = 0; y < targetHeight; y++) {
+                let rowBytes = new Uint8Array(bytesPerLine);
+                for (let xByte = 0; xByte < bytesPerLine; xByte++) {
+                    let byte = 0;
+                    for (let bit = 0; bit < 8; bit++) {
+                        let pxX = xByte * 8 + bit;
+                        if (pxX < targetWidth) {
+                            let offset = (y * targetWidth + pxX) * 4;
+                            let gray = 0.299 * data[offset] + 0.587 * data[offset + 1] + 0.114 * data[offset + 2];
+                            if (gray < 135) {
+                                byte |= (1 << (7 - bit));
+                            }
+                        }
+                    }
+                    rowBytes[xByte] = byte;
+                }
+                scanlines.push(rowBytes);
+            }
 
             try {
-                document.getElementById('status').innerText = "Processing & printing via official SDK...";
+                document.getElementById('status').innerText = "Initializing print head...";
                 
-                // Configure print speed & thermal energy density using SDK parameters
-                await printer.prepare(32, 28000);
-                
-                // Send image through built-in dithering filter
-                await printer.printImage(imageUrl, { dither: 'threshold' });
-                
-                // Feed paper out of cutter slot
-                await printer.feed(60);
+                await pCharacteristic.writeValue(buildPacket(0xA4, [0x35]));
+                await new Promise(r => setTimeout(r, 30));
+                await pCharacteristic.writeValue(buildPacket(0xAF, [0x00, 0x90]));
+                await new Promise(r => setTimeout(r, 30));
+                await pCharacteristic.writeValue(buildPacket(0xBE, [0x00]));
+                await new Promise(r => setTimeout(r, 50));
+
+                document.getElementById('status').innerText = "Sending image lines...";
+
+                for (let i = 0; i < scanlines.length; i++) {
+                    let packet = buildPacket(0xA2, Array.from(scanlines[i]));
+                    
+                    if (pCharacteristic.properties.writeWithoutResponse) {
+                        await pCharacteristic.writeValueWithoutResponse(packet);
+                    } else {
+                        await pCharacteristic.writeValue(packet);
+                    }
+
+                    await new Promise(r => setTimeout(r, 12));
+
+                    if (i % 40 === 0) {
+                        document.getElementById('status').innerText = `Printing line ${i}/${targetHeight}...`;
+                    }
+                }
+
+                await new Promise(r => setTimeout(r, 100));
+                await pCharacteristic.writeValue(buildPacket(0xBD, [0x60, 0x00]));
 
                 document.getElementById('status').innerText = "Print complete! 🎉";
             } catch (err) {
                 document.getElementById('status').innerText = "Print error: " + err.message;
             }
-        };
+        }
     </script>
 </body>
 </html>
