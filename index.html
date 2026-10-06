@@ -140,23 +140,51 @@ function buildJob(bits,h){
 }
 const sleep = ms => new Promise(r=>setTimeout(r,ms));
 
+const CANDIDATES = [[0xAE30,0xAE01],[0xAF30,0xAF31],[0x18F0,0x2AF1],[0xFF00,0xFF02],[0xFFE0,0xFFE1]];
+const errText = e => (e && (e.message || e.name)) || String(e);
+
 $('conn').onclick = async () => {
   if(!navigator.bluetooth){
     say('This browser has no Bluetooth. On iPhone, open this page in the Bluefy browser.','err'); return;
   }
+  let step = 'choosing device';
   try{
     say('Choose your printer…');
-    device = await navigator.bluetooth.requestDevice({acceptAllDevices:true,optionalServices:[SERVICE,0xAF30,0xFF00]});
+    device = await navigator.bluetooth.requestDevice({
+      acceptAllDevices:true,
+      optionalServices: CANDIDATES.map(c=>c[0])
+    });
     device.addEventListener('gattserverdisconnected',()=>{
       writeChar=null; $('print').disabled=true; $('conn').textContent='Connect'; say('Printer disconnected. Tap Connect.','err');
     });
+    step = 'connecting to ' + (device.name||'device');
+    say('Connecting to ' + (device.name||'device') + '…');
     const server = await device.gatt.connect();
-    const svc = await server.getPrimaryService(SERVICE);
-    writeChar = await svc.getCharacteristic(CHAR);
+    await sleep(500);
+    step = 'finding print service';
+    let found = null;
+    for(const [s,c] of CANDIDATES){
+      try{
+        const svc = await server.getPrimaryService(s);
+        found = await svc.getCharacteristic(c);
+        break;
+      }catch(_){}
+    }
+    if(!found){
+      // last resort: any writable characteristic on any allowed service
+      for(const svc of await server.getPrimaryServices().catch(()=>[])){
+        for(const ch of await svc.getCharacteristics().catch(()=>[])){
+          if(ch.properties.writeWithoutResponse){ found = ch; break; }
+        }
+        if(found) break;
+      }
+    }
+    if(!found) throw new Error('no writable printer service found on ' + (device.name||'this device') + ' (is it the printer?)');
+    writeChar = found;
     $('conn').textContent = 'Connected';
     $('print').disabled = !bitmap;
     say('Connected to ' + (device.name||'printer') + '.','ok');
-  }catch(e){ say('Could not connect: ' + e.message,'err'); }
+  }catch(e){ say('Failed while ' + step + ': ' + errText(e),'err'); }
 };
 
 $('print').onclick = async () => {
