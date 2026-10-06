@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cat Printer Web App</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #f4f4f9;
+            color: #333;
+            text-align: center;
+            padding: 20px;
+            margin: 0;
+        }
+        h1 { font-size: 1.5rem; margin-bottom: 5px; }
+        #status {
+            font-size: 0.9rem;
+            color: #666;
+            margin-bottom: 15px;
+            padding: 8px;
+            background: #e2e2e8;
+            border-radius: 8px;
+            display: inline-block;
+        }
+        .camera-container {
+            position: relative;
+            width: 100%;
+            max-width: 400px;
+            margin: 0 auto 15px auto;
+            background: #000;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+        }
+        video, canvas {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+        canvas { display: none; }
+        button {
+            width: 100%;
+            max-width: 400px;
+            background: #ff6b81;
+            color: white;
+            border: none;
+            padding: 14px;
+            font-size: 1rem;
+            font-weight: bold;
+            border-radius: 12px;
+            cursor: pointer;
+            margin-bottom: 10px;
+            box-shadow: 0 4px 6px rgba(255,107,129,0.3);
+        }
+        button#btBtn { background: #4a90e2; box-shadow: 0 4px 6px rgba(74,144,226,0.3); }
+        button:disabled { background: #ccc; box-shadow: none; }
+    </style>
+</head>
+<body>
+
+    <h1>Cat Printer Cam 🐱</h1>
+    <div id="status">Status: Disconnected</div>
+    <br>
+
+    <button id="btBtn" onclick="connectPrinter()">Scan & Connect Printer</button>
+
+    <div class="camera-container">
+        <video id="video" autoplay playsinline></video>
+    </div>
+
+    <button id="printBtn" onclick="snapAndPrint()" disabled>Snap & Print Photo</button>
+    <canvas id="canvas"></canvas>
+
+    <script>
+        let bluetoothDevice;
+        let pCharacteristic;
+
+        // 1. Initialize Camera Feed
+        async function initCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+                document.getElementById('video').srcObject = stream;
+            } catch (err) {
+                document.getElementById('status').innerText = "Camera access denied or unavailable.";
+            }
+        }
+        initCamera();
+
+        // 2. Connect to Printer via Web Bluetooth
+        async function connectPrinter() {
+            try {
+                document.getElementById('status').innerText = "Searching for printers...";
+                
+                // Request BLE device (accepts any device, or filter by name/services if needed)
+                bluetoothDevice = await navigator.bluetooth.requestDevice({
+                    acceptAllDevices: true,
+                    optionalServices: ['0000ff00-0000-1000-8000-00805f9b34fb', '49535343-fe7d-4ae5-8fa9-9fafd205e455'] // Common thermal printer UUIDs
+                });
+
+                document.getElementById('status').innerText = `Connecting to ${bluetoothDevice.name || 'Printer'}...`;
+                const server = await bluetoothDevice.gatt.connect();
+                
+                // Discover primary services and writable characteristic
+                const services = await server.getPrimaryServices();
+                for (const service of services) {
+                    const characteristics = await service.getCharacteristics();
+                    for (const char of characteristics) {
+                        if (char.properties.write || char.properties.writeWithoutResponse) {
+                            pCharacteristic = char;
+                            break;
+                        }
+                    }
+                }
+
+                if (pCharacteristic) {
+                    document.getElementById('status').innerText = "Connected! Ready to print.";
+                    document.getElementById('printBtn').disabled = false;
+                    document.getElementById('btBtn').innerText = "Connected ✅";
+                } else {
+                    document.getElementById('status').innerText = "Connected, but no writable channel found.";
+                }
+
+            } catch (err) {
+                document.getElementById('status').innerText = "Connection failed: " + err.message;
+            }
+        }
+
+        // 3. Snap Photo & Convert to Thermal Data
+        async function snapAndPrint() {
+            if (!pCharacteristic) return;
+            
+            const video = document.getElementById('video');
+            const canvas = document.getElementById('canvas');
+            const ctx = canvas.getContext('2d');
+
+            // Set thermal printer width standard (384 pixels)
+            const targetWidth = 384;
+            const scale = targetWidth / video.videoWidth;
+            const targetHeight = Math.floor(video.videoHeight * scale);
+
+            canvas.width = targetWidth;
+            canvas.height = targetHeight;
+
+            // Draw current video frame onto hidden canvas
+            ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
+            
+            // Extract grayscale image data
+            const imgData = ctx.getImageData(0, 0, targetWidth, targetHeight);
+            const data = imgData.data;
+
+            document.getElementById('status').innerText = "Processing image...";
+
+            let bytesPerRow = Math.ceil(targetWidth / 8);
+            let printBytes = [];
+
+            // ESC/POS Commands: Initialize Printer
+            printBytes.push(0x1B, 0x40);
+
+            // ESC/POS Command: Raster Bit Image (GS v 0)
+            let xl = bytesPerRow & 0xFF;
+            let xh = (bytesPerRow >> 8) & 0xFF;
+            let yl = targetHeight & 0xFF;
+            let yh = (targetHeight >> 8) & 0xFF;
+            printBytes.push(0x1D, 0x76, 0x30, 0x00, xl, xh, yl, yh);
+
+            // Convert pixels into 1-bit monochrome data payload
+            for (let y = 0; y < targetHeight; y++) {
+                for (let xByte = 0; xByte < bytesPerRow; xByte++) {
+                    let byte = 0;
+                    for (let bit = 0; bit < 8; bit++) {
+                        let pxX = xByte * 8 + bit;
+                        if (pxX < targetWidth) {
+                            let offset = (y * targetWidth + pxX) * 4;
+                            let r = data[offset];
+                            let g = data[offset + 1];
+                            let b = data[offset + 2];
+                            let avg = (r + g + b) / 3;
+                            
+                            // Threshold filter (Darker than 128 becomes a black pixel dot)
+                            if (avg < 128) {
+                                byte |= (1 << (7 - bit));
+                            }
+                        }
+                    }
+                    printBytes.push(byte);
+                }
+            }
+
+            // Feed and cut paper bytes
+            printBytes.push(0x1A, 0x01, 0x03);
+
+            document.getElementById('status').innerText = "Sending to printer...";
+
+            try {
+                // Chunk the data transmission to avoid crashing the Bluetooth buffer
+                const chunkSize = 150;
+                const uint8Array = new Uint8Array(printBytes);
+                
+                for (let i = 0; i < uint8Array.length; i += chunkSize) {
+                    let chunk = uint8Array.slice(i, i + chunkSize);
+                    await pCharacteristic.writeValueWithoutResponse(chunk);
+                    // Tiny micro-pause to let printer buffer process
+                    await new Promise(resolve => setTimeout(resolve, 15));
+                }
+
+                document.getElementById('status').innerText = "Print complete! 🎉";
+            } catch (err) {
+                document.getElementById('status').innerText = "Print error: " + err.message;
+            }
+        }
+    </script>
+</body>
+</html>
