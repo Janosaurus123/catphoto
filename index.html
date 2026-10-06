@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cat Printer Web App</title>
+    <title>Tiny Print X6H Camera</title>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -13,20 +13,22 @@
             padding: 20px;
             margin: 0;
         }
-        h1 { font-size: 1.5rem; margin-bottom: 5px; }
+        h1 { font-size: 1.4rem; margin-bottom: 5px; }
         #status {
-            font-size: 0.9rem;
-            color: #666;
+            font-size: 0.85rem;
+            color: #444;
             margin-bottom: 15px;
-            padding: 8px;
+            padding: 8px 12px;
             background: #e2e2e8;
             border-radius: 8px;
             display: inline-block;
+            max-width: 90%;
+            word-break: break-all;
         }
         .camera-container {
             position: relative;
             width: 100%;
-            max-width: 400px;
+            max-width: 384px;
             margin: 0 auto 15px auto;
             background: #000;
             border-radius: 12px;
@@ -41,7 +43,7 @@
         canvas { display: none; }
         button {
             width: 100%;
-            max-width: 400px;
+            max-width: 384px;
             background: #ff6b81;
             color: white;
             border: none;
@@ -59,11 +61,11 @@
 </head>
 <body>
 
-    <h1>Cat Printer Cam 🐱</h1>
+    <h1>Tiny Print X6H Cam 🐱</h1>
     <div id="status">Status: Disconnected</div>
     <br>
 
-    <button id="btBtn" onclick="connectPrinter()">Scan & Connect Printer</button>
+    <button id="btBtn" onclick="connectPrinter()">Scan & Connect X6H</button>
 
     <div class="camera-container">
         <video id="video" autoplay playsinline></video>
@@ -76,10 +78,12 @@
         let bluetoothDevice;
         let pCharacteristic;
 
-        // 1. Initialize Camera Feed
+        // 1. Initialize iPhone Camera Stream
         async function initCamera() {
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { facingMode: 'environment', width: { ideal: 384 } } 
+                });
                 document.getElementById('video').srcObject = stream;
             } catch (err) {
                 document.getElementById('status').innerText = "Camera access denied or unavailable.";
@@ -87,34 +91,31 @@
         }
         initCamera();
 
-        // 2. Connect to Printer via Web Bluetooth
+        // 2. Connect via Web Bluetooth to X6H Printer Service (AE30)
         async function connectPrinter() {
             try {
-                document.getElementById('status').innerText = "Searching for printers...";
+                document.getElementById('status').innerText = "Searching for X6H printer...";
                 
-                // Request BLE device (accepts any device, or filter by name/services if needed)
                 bluetoothDevice = await navigator.bluetooth.requestDevice({
                     acceptAllDevices: true,
-                    optionalServices: ['0000ff00-0000-1000-8000-00805f9b34fb', '49535343-fe7d-4ae5-8fa9-9fafd205e455'] // Common thermal printer UUIDs
+                    optionalServices: ['0000ae30-0000-1000-8000-00805f9b34fb', '0000ae3a-0000-1000-8000-00805f9b34fb']
                 });
 
-                document.getElementById('status').innerText = `Connecting to ${bluetoothDevice.name || 'Printer'}...`;
+                document.getElementById('status').innerText = "Connecting to GATT...";
                 const server = await bluetoothDevice.gatt.connect();
                 
-                // Discover primary services and writable characteristic
-                const services = await server.getPrimaryServices();
-                for (const service of services) {
-                    const characteristics = await service.getCharacteristics();
-                    for (const char of characteristics) {
-                        if (char.properties.write || char.properties.writeWithoutResponse) {
-                            pCharacteristic = char;
-                            break;
-                        }
+                const service = await server.getPrimaryService('0000ae30-0000-1000-8000-00805f9b34fb');
+                const characteristics = await service.getCharacteristics();
+                
+                for (const char of characteristics) {
+                    if (char.properties.write || char.properties.writeWithoutResponse) {
+                        pCharacteristic = char;
+                        break;
                     }
                 }
 
                 if (pCharacteristic) {
-                    document.getElementById('status').innerText = "Connected! Ready to print.";
+                    document.getElementById('status').innerText = "Connected! Ready to print ✅";
                     document.getElementById('printBtn').disabled = false;
                     document.getElementById('btBtn').innerText = "Connected ✅";
                 } else {
@@ -122,11 +123,24 @@
                 }
 
             } catch (err) {
-                document.getElementById('status').innerText = "Connection failed: " + err.message;
+                document.getElementById('status').innerText = "Connection error: " + err.message;
             }
         }
 
-        // 3. Snap Photo & Convert to Thermal Data
+        // Helper to construct X6h protocol command packets
+        function buildX6hPacket(command, payload) {
+            let pkt = [];
+            // Magic bytes [0x51, 0x78]
+            pkt.push(0x51, 0x78);
+            pkt.push(command);
+            pkt.push(0x00); // Direction flag host-to-printer
+            let len = payload.length;
+            pkt.push(len & 0xFF, (len >> 8) & 0xFF);
+            pkt.push(...payload);
+            return new Uint8Array(pkt);
+        }
+
+        // 3. Snap Photo, Format to 384px Width, and Send X6h Handshake Stream
         async function snapAndPrint() {
             if (!pCharacteristic) return;
             
@@ -134,75 +148,88 @@
             const canvas = document.getElementById('canvas');
             const ctx = canvas.getContext('2d');
 
-            // Set thermal printer width standard (384 pixels)
-            const targetWidth = 384;
+            const targetWidth = 384; // X6H native printhead width requirement
             const scale = targetWidth / video.videoWidth;
             const targetHeight = Math.floor(video.videoHeight * scale);
 
             canvas.width = targetWidth;
             canvas.height = targetHeight;
-
-            // Draw current video frame onto hidden canvas
             ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
             
-            // Extract grayscale image data
             const imgData = ctx.getImageData(0, 0, targetWidth, targetHeight);
             const data = imgData.data;
 
             document.getElementById('status').innerText = "Processing image...";
 
-            let bytesPerRow = Math.ceil(targetWidth / 8);
-            let printBytes = [];
+            let bytesPerLine = Math.ceil(targetWidth / 8); // 48 bytes per row
+            let scanlines = [];
 
-            // ESC/POS Commands: Initialize Printer
-            printBytes.push(0x1B, 0x40);
-
-            // ESC/POS Command: Raster Bit Image (GS v 0)
-            let xl = bytesPerRow & 0xFF;
-            let xh = (bytesPerRow >> 8) & 0xFF;
-            let yl = targetHeight & 0xFF;
-            let yh = (targetHeight >> 8) & 0xFF;
-            printBytes.push(0x1D, 0x76, 0x30, 0x00, xl, xh, yl, yh);
-
-            // Convert pixels into 1-bit monochrome data payload
+            // Convert pixels into 1-bit monochrome scanlines (LSB first encoding for X6h)
             for (let y = 0; y < targetHeight; y++) {
-                for (let xByte = 0; xByte < bytesPerRow; xByte++) {
+                let rowBytes = new Uint8Array(bytesPerLine);
+                for (let xByte = 0; xByte < bytesPerLine; xByte++) {
                     let byte = 0;
                     for (let bit = 0; bit < 8; bit++) {
                         let pxX = xByte * 8 + bit;
                         if (pxX < targetWidth) {
                             let offset = (y * targetWidth + pxX) * 4;
-                            let r = data[offset];
-                            let g = data[offset + 1];
-                            let b = data[offset + 2];
-                            let avg = (r + g + b) / 3;
-                            
-                            // Threshold filter (Darker than 128 becomes a black pixel dot)
+                            let avg = (data[offset] + data[offset + 1] + data[offset + 2]) / 3;
+                            // Threshold adjustment: pixels darker than 128 become black dots
                             if (avg < 128) {
-                                byte |= (1 << (7 - bit));
+                                byte |= (1 << bit); // LSB-first bit setting for X6h
                             }
                         }
                     }
-                    printBytes.push(byte);
+                    rowBytes[xByte] = byte;
                 }
+                scanlines.push(rowBytes);
             }
 
-            // Feed and cut paper bytes
-            printBytes.push(0x1A, 0x01, 0x03);
-
-            document.getElementById('status').innerText = "Sending to printer...";
-
             try {
-                // Chunk the data transmission to avoid crashing the Bluetooth buffer
-                const chunkSize = 150;
-                const uint8Array = new Uint8Array(printBytes);
+                // X6H Initialization Handshake Sequence
+                document.getElementById('status').innerText = "Initializing X6H printhead...";
                 
-                for (let i = 0; i < uint8Array.length; i += chunkSize) {
-                    let chunk = uint8Array.slice(i, i + chunkSize);
-                    await pCharacteristic.writeValueWithoutResponse(chunk);
-                    // Tiny micro-pause to let printer buffer process
-                    await new Promise(resolve => setTimeout(resolve, 15));
+                // Set print quality (0x35 = high quality)
+                await pCharacteristic.writeValue(buildX6hPacket(0xA4, [0x35]));
+                await new Promise(r => setTimeout(r, 50));
+
+                // Set thermal head energy level (darkness configuration)
+                await pCharacteristic.writeValue(buildX6hPacket(0xAF, [0x00, 0x60]));
+                await new Promise(r => setTimeout(r, 50));
+
+                // Enter start print mode
+                await pCharacteristic.writeValue(buildX6hPacket(0xBE, [0x00]));
+                await new Promise(r => setTimeout(r, 100));
+
+                document.getElementById('status').innerText = "Sending image data...";
+
+                // Send row-by-row using command 0xA2 (Raw Scanline) with strict pacing delays
+                for (let i = 0; i < scanlines.length; i++) {
+                    let packet = buildX6hPacket(0xA2, Array.from(scanlines[i]));
+                    
+                    // Write value without response for speedy batch transfer or withResponse if packet loss happens
+                    if (pCharacteristic.properties.writeWithoutResponse) {
+                        await pCharacteristic.writeValueWithoutResponse(packet);
+                    } else {
+                        await pCharacteristic.writeValue(packet);
+                    }
+
+                    // Crucial 15ms delay per line to prevent hardware buffer overflow
+                    await new Promise(r => setTimeout(r, 15));
+
+                    // Extra break every 8 lines to let the stepper motor catch up smoothly
+                    if (i % 8 === 0) {
+                        await new Promise(r => setTimeout(r, 10));
+                    }
+                    
+                    if (i % 20 === 0) {
+                        document.getElementById('status').innerText = `Printing line ${i}/${targetHeight}...`;
+                    }
                 }
+
+                // Feed paper instructions at the end to push print out of slot
+                await new Promise(r => setTimeout(r, 100));
+                await pCharacteristic.writeValue(buildX6hPacket(0xBD, [0x30, 0x00])); // Feed paper command
 
                 document.getElementById('status').innerText = "Print complete! 🎉";
             } catch (err) {
