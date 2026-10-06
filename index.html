@@ -33,7 +33,7 @@
   #snap i{width:64px;height:64px;border-radius:50%;background:#fff;transition:transform .12s}
   #snap:active i{transform:scale(.88)}
   #preview-bar{display:none;align-items:center;justify-content:space-between;width:100%}
-  .pill{height:50px;padding:0 26px;border-radius:25px;font-size:17px;font-weight:600}
+  .pill{height:50px;padding:0 20px;border-radius:25px;font-size:17px;font-weight:600}
   .pill.main{background:var(--yellow);color:#000}
   .pill:disabled{opacity:.45}
   body.review #controls .cam{display:none} body.review #preview-bar{display:flex} body.review #mode{visibility:hidden}
@@ -54,6 +54,19 @@
   .switch::after{content:"";position:absolute;top:2px;left:2px;width:27px;height:27px;border-radius:50%;background:#fff;box-shadow:0 2px 5px rgba(0,0,0,.3);transition:.25s}
   .switch[aria-checked=true]{background:var(--green)} .switch[aria-checked=true]::after{transform:translateX(20px)}
   #done{width:100%;height:50px;border-radius:14px;background:var(--blue);font-weight:600;font-size:17px}
+  #sheet{max-height:88vh;overflow-y:auto}
+  .gt{font-size:13px;color:#9b9ba1;margin:0 0 6px 16px}
+  .row.col{flex-direction:column;align-items:stretch;gap:4px}
+  .lab{display:flex;justify-content:space-between}
+  .lab b{font-weight:500;color:#9b9ba1;font-variant-numeric:tabular-nums}
+  input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:28px;background:none;margin:0}
+  input[type=range]::-webkit-slider-runnable-track{height:4px;border-radius:2px;background:rgba(255,255,255,.28)}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:28px;height:28px;border-radius:50%;background:#fff;margin-top:-12px;box-shadow:0 2px 6px rgba(0,0,0,.35)}
+  input[type=range]::-moz-range-track{height:4px;border-radius:2px;background:rgba(255,255,255,.28)}
+  input[type=range]::-moz-range-thumb{width:28px;height:28px;border:0;border-radius:50%;background:#fff}
+  .seg{display:flex;background:rgba(118,118,128,.32);border-radius:9px;padding:2px;width:190px;flex:none}
+  .seg button{flex:1;padding:6px 0;border-radius:7px;font-size:14px;font-weight:500}
+  .seg button[aria-pressed=true]{background:rgba(255,255,255,.24);font-weight:600}
   @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 </style>
 </head>
@@ -80,10 +93,12 @@
   </button>
   <div id="preview-bar">
     <button class="pill glass" id="retake">Retake</button>
+    <button class="pill glass" id="save">Save</button>
     <button class="pill main" id="print">Print</button>
   </div>
 </div>
 
+<input type="file" id="file" accept="image/*" hidden>
 <div id="scrim"></div>
 <div id="sheet" class="glass" role="dialog" aria-label="Settings">
   <div id="grab"></div>
@@ -98,6 +113,16 @@
       <button class="switch" id="auto" role="switch" aria-checked="false" aria-label="Auto print"></button>
     </div>
   </div>
+  <p class="gt">Print</p>
+  <div class="group">
+    <div class="row col"><div class="lab"><span>Darkness</span><b id="v-dark"></b></div><input type="range" id="dark" min="0" max="100"></div>
+    <div class="row col"><div class="lab"><span>Brightness</span><b id="v-bright"></b></div><input type="range" id="bright" min="-100" max="100"></div>
+    <div class="row col"><div class="lab"><span>Contrast</span><b id="v-con"></b></div><input type="range" id="con" min="-100" max="100"></div>
+    <div class="row col"><div class="lab"><span>Paper feed after print</span><b id="v-feed"></b></div><input type="range" id="feed" min="0" max="250"></div>
+    <div class="row"><span>Style</span><div class="seg" id="seg-style"><button data-v="dither">Dither</button><button data-v="threshold">Solid</button></div></div>
+    <div class="row"><span>Save photos as</span><div class="seg" id="seg-save"><button data-v="color">Color</button><button data-v="printed">Printed</button></div></div>
+    <div class="row"><span>Print settings</span><button id="reset" style="color:var(--blue);font-size:16px">Reset</button></div>
+  </div>
   <button id="done">Done</button>
 </div>
 
@@ -107,8 +132,38 @@ const cam = $('cam'), shot = $('shot');
 const PRINT_W = 384, SERVICE = 0xAE30, CHAR = 0xAE01;
 let facing = 'environment', stream = null, device = null, writeChar = null, bitmap = null, autoPrint = false, busy = false;
 
-try{ autoPrint = localStorage.getItem('autoPrint') === '1'; }catch(_){}
+/* Settings live in cookies (1 year); localStorage is a fallback for file:// where cookies don't work */
+const store = {
+  get(k){
+    const m = document.cookie.match(new RegExp('(?:^|; )' + k + '=([^;]*)'));
+    if(m){ try{ return decodeURIComponent(m[1]); }catch(_){} }
+    try{ return localStorage.getItem(k); }catch(_){ return null; }
+  },
+  set(k,v){
+    document.cookie = k + '=' + encodeURIComponent(v) + '; max-age=31536000; path=/; SameSite=Lax' + (location.protocol==='https:' ? '; Secure' : '');
+    try{ localStorage.setItem(k,v); }catch(_){}
+  }
+};
+autoPrint = store.get('autoPrint') === '1';
 $('auto').setAttribute('aria-checked', autoPrint);
+
+const DEF = {dark:50,bright:0,con:0,feed:96,style:'dither',save:'color'};
+let S = {...DEF}, source = null, rafId = 0;
+try{ S = {...DEF, ...JSON.parse(store.get('printSettings')||'{}')}; }catch(_){}
+const saveS = () => store.set('printSettings', JSON.stringify(S));
+function syncUI(){
+  for(const k of ['dark','bright','con','feed']){ $(k).value = S[k]; $('v-'+k).textContent = S[k]; }
+  for(const [id,key] of [['seg-style','style'],['seg-save','save']])
+    document.querySelectorAll('#'+id+' button').forEach(b=>b.setAttribute('aria-pressed', b.dataset.v===S[key]));
+}
+for(const k of ['dark','bright','con','feed']) $(k).oninput = () => {
+  S[k] = +$(k).value; $('v-'+k).textContent = S[k]; saveS();
+  if(k==='bright'||k==='con'){ cancelAnimationFrame(rafId); rafId = requestAnimationFrame(reprocess); }
+};
+for(const [id,key] of [['seg-style','style'],['seg-save','save']])
+  document.querySelectorAll('#'+id+' button').forEach(b=>b.onclick=()=>{ S[key]=b.dataset.v; saveS(); syncUI(); if(key==='style') reprocess(); });
+$('reset').onclick = () => { S = {...DEF}; saveS(); syncUI(); reprocess(); };
+syncUI();
 
 /* ---------- UI helpers ---------- */
 let tt;
@@ -121,7 +176,7 @@ $('gear').onclick = () => sheet(true);
 $('done').onclick = $('scrim').onclick = () => sheet(false);
 $('auto').onclick = () => {
   autoPrint = !autoPrint; $('auto').setAttribute('aria-checked', autoPrint);
-  try{ localStorage.setItem('autoPrint', autoPrint ? '1' : '0'); }catch(_){}
+  store.set('autoPrint', autoPrint ? '1' : '0');
 };
 function setConn(on, name){
   $('conn').textContent = on ? 'Disconnect' : 'Connect';
@@ -140,24 +195,63 @@ async function startCam(){
 }
 $('flip').onclick = () => { facing = facing==='environment' ? 'user' : 'environment'; startCam(); };
 
-$('snap').onclick = async () => {
-  const vw = cam.videoWidth, vh = cam.videoHeight;
-  if(!vw){ say('Camera is not ready yet','err'); return; }
-  const h = Math.round(PRINT_W * vh / vw);
+const MAXW = 1600;
+function fitCanvas(src, w, h){
+  const k = Math.min(1, MAXW / w), c = document.createElement('canvas');
+  c.width = Math.round(w*k); c.height = Math.round(h*k);
+  const x = c.getContext('2d'); x.imageSmoothingQuality = 'high'; x.drawImage(src,0,0,c.width,c.height);
+  return c;
+}
+function reprocess(){
+  if(!source) return;
+  const h = Math.round(PRINT_W * source.height / source.width);
   const c = document.createElement('canvas'); c.width = PRINT_W; c.height = h;
-  const x = c.getContext('2d'); x.drawImage(cam,0,0,PRINT_W,h);
+  const x = c.getContext('2d'); x.imageSmoothingQuality = 'high'; x.drawImage(source,0,0,PRINT_W,h);
   bitmap = dither(x.getImageData(0,0,PRINT_W,h));
   shot.width = PRINT_W; shot.height = h;
   shot.getContext('2d').putImageData(toImage(bitmap,h),0,0);
-  $('thumb').style.backgroundImage = 'url(' + shot.toDataURL() + ')';
+}
+function showSource(c){
+  source = c; reprocess();
+  const t = document.createElement('canvas'); t.width = 160; t.height = Math.round(160*c.height/c.width);
+  t.getContext('2d').drawImage(c,0,0,t.width,t.height);
+  $('thumb').style.backgroundImage = 'url(' + t.toDataURL('image/jpeg',.7) + ')';
   shot.style.display = 'block'; document.body.classList.add('review');
+}
+$('snap').onclick = async () => {
+  if(!cam.videoWidth){ say('Camera is not ready yet','err'); return; }
+  showSource(fitCanvas(cam, cam.videoWidth, cam.videoHeight));
   if(autoPrint){
-    if(writeChar) await printNow();
-    else { say('Connect a printer in Settings','err'); }
+    if(writeChar) await printNow(); else say('Connect a printer in Settings','err');
   }
 };
+
+/* ---------- Photo library: open and save ---------- */
+$('thumb').onclick = () => $('file').click();
+$('file').onchange = async e => {
+  const f = e.target.files[0]; e.target.value = '';
+  if(!f) return;
+  try{
+    const bm = await createImageBitmap(f, {imageOrientation:'from-image'});
+    showSource(fitCanvas(bm, bm.width, bm.height)); if(bm.close) bm.close();
+  }catch(err){ say('Could not open that photo','err'); }
+};
+$('save').onclick = async () => {
+  if(!source) return;
+  const printed = S.save === 'printed', cv = printed ? shot : source;
+  const type = printed ? 'image/png' : 'image/jpeg';
+  const blob = await new Promise(r => cv.toBlob(r, type, .92));
+  const file = new File([blob], 'photo-' + Date.now() + (printed ? '.png' : '.jpg'), {type});
+  try{
+    if(navigator.canShare && navigator.canShare({files:[file]})){
+      await navigator.share({files:[file]}); say('Tap Save Image to add it to Photos','ok'); return;
+    }
+  }catch(err){ if(err && err.name === 'AbortError') return; }
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = file.name; a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 4000); say('Saved to Downloads','ok');
+};
 function backToCamera(){
-  bitmap = null; shot.style.display = 'none'; document.body.classList.remove('review');
+  bitmap = null; source = null; shot.style.display = 'none'; document.body.classList.remove('review');
 }
 $('retake').onclick = backToCamera;
 
@@ -170,10 +264,11 @@ function dither(img){
     g[i] = v; if(v<lo) lo=v; if(v>hi) hi=v;
   }
   const span = Math.max(hi-lo,1);
-  for(let i=0;i<g.length;i++) g[i] = (g[i]-lo)/span*255;
+  const cf = 1 + S.con/100, bo = S.bright*1.28;
+  for(let i=0;i<g.length;i++) g[i] = Math.max(0,Math.min(255,((g[i]-lo)/span*255-128)*cf+128+bo));
   const out = new Uint8Array(w*h);
   for(let y=0;y<h;y++) for(let x=0;x<w;x++){
-    const i = y*w+x, old = g[i], nw = old<128 ? 0 : 255, err = old-nw;
+    const i = y*w+x, old = g[i], nw = old<128 ? 0 : 255, err = S.style==='threshold' ? 0 : old-nw;
     out[i] = nw===0 ? 1 : 0;
     if(x+1<w) g[i+1] += err*7/16;
     if(y+1<h){
@@ -206,7 +301,8 @@ function buildJob(bits,h){
   add(0xA3,[0x00]);
   add(0xA4,[0x32]);
   add(0xA6,[0xAA,0x55,0x17,0x38,0x44,0x5F,0x5F,0x5F,0x44,0x38,0x2C]);
-  add(0xAF,[0xE0,0x2E]);   // energy: raise for darker prints
+  const energy = 4000 + S.dark*160;
+  add(0xAF,[energy&255,energy>>8]);
   add(0xBE,[0x00]);
   add(0xBD,[0x20]);
   for(let y=0;y<h;y++){
@@ -214,7 +310,7 @@ function buildJob(bits,h){
     for(let x=0;x<PRINT_W;x++) if(bits[y*PRINT_W+x]) row[x>>3] |= 1<<(x&7);
     add(0xA2,row);
   }
-  add(0xA1,[0x60,0x00]);
+  add(0xA1,[S.feed&255,S.feed>>8]);
   add(0xA6,[0xAA,0x55,0x17,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x17]);
   add(0xA3,[0x00]);
   return Uint8Array.from(out);
