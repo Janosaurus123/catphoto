@@ -150,10 +150,21 @@ $('conn').onclick = async () => {
   let step = 'choosing device';
   try{
     say('Choose your printer…');
-    device = await navigator.bluetooth.requestDevice({
-      acceptAllDevices:true,
-      optionalServices: CANDIDATES.map(c=>c[0])
-    });
+    const full = n => '0000' + n.toString(16).padStart(4,'0') + '-0000-1000-8000-00805f9b34fb';
+    const attempts = [
+      {acceptAllDevices:true, optionalServices:[full(0xAE30), full(0xAF30), full(0x18F0)]},
+      {acceptAllDevices:true, optionalServices:[full(0xAE30)]},
+      {acceptAllDevices:true}
+    ];
+    let lastErr; device = null;
+    for(const opts of attempts){
+      try{ device = await navigator.bluetooth.requestDevice(opts); break; }
+      catch(err){
+        lastErr = err;
+        if(err && err.name === 'NotFoundError') break;   // user cancelled or nothing found
+      }
+    }
+    if(!device) throw new Error('picker failed (' + errText(lastErr) + '). Make sure the printer is on, nearby, and not connected to another app.');
     device.addEventListener('gattserverdisconnected',()=>{
       writeChar=null; $('print').disabled=true; $('conn').textContent='Connect'; say('Printer disconnected. Tap Connect.','err');
     });
@@ -162,7 +173,7 @@ $('conn').onclick = async () => {
     const server = await device.gatt.connect();
     await sleep(500);
     step = 'finding print service';
-    let found = null;
+    let found = null; await sleep(300);
     for(const [s,c] of CANDIDATES){
       try{
         const svc = await server.getPrimaryService(s);
