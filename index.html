@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cat Printer Web SDK Cam</title>
+    <title>Universal Cat Printer Camera</title>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -61,11 +61,11 @@
 </head>
 <body>
 
-    <h1>Cat Printer SDK Cam 🐱</h1>
+    <h1>Print Cam v4</h1>
     <div id="status">Status: Disconnected</div>
     <br>
 
-    <button id="btBtn" onclick="connectPrinter()">Connect Cat Printer</button>
+    <button id="btBtn" onclick="connectPrinter()">Select & Connect Printer</button>
 
     <div class="camera-container">
         <video id="video" autoplay playsinline></video>
@@ -78,7 +78,7 @@
         let bluetoothDevice;
         let pCharacteristic;
 
-        // 1. Start Live Camera Preview
+        // 1. Initialize Camera Feed
         async function initCamera() {
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ 
@@ -91,17 +91,18 @@
         }
         initCamera();
 
-        // 2. Connect using broad SDK service discovery (handles X6H and standard cat printers)
+        // 2. Universal Connection Handler (Checks all known printer profile services)
         async function connectPrinter() {
             try {
-                document.getElementById('status').innerText = "Requesting Bluetooth Device...";
+                document.getElementById('status').innerText = "Scanning for printers...";
                 
                 bluetoothDevice = await navigator.bluetooth.requestDevice({
                     acceptAllDevices: true,
                     optionalServices: [
-                        '0000ff00-0000-1000-8000-00805f9b34fb', 
-                        '49535343-fe7d-4ae5-8fa9-9fafd205e455', 
-                        '0000ae30-0000-1000-8000-00805f9b34fb'
+                        '0000ff00-0000-1000-8000-00805f9b34fb', // Standard Cat Printer / MXW01
+                        '49535343-fe7d-4ae5-8fa9-9fafd205e455', // ISSC Transparent UART
+                        '0000ae30-0000-1000-8000-00805f9b34fb', // X6H / Tiny Print Service
+                        '000018f0-0000-1000-8000-00805f9b34fb'  // Generic POS Printer Service
                     ]
                 });
 
@@ -121,7 +122,7 @@
                 }
 
                 if (pCharacteristic) {
-                    document.getElementById('status').innerText = "Connected! Ready to print ✅";
+                    document.getElementById('status').innerText = "Connected! Ready ✅";
                     document.getElementById('printBtn').disabled = false;
                     document.getElementById('btBtn').innerText = "Connected ✅";
                 } else {
@@ -133,8 +134,8 @@
             }
         }
 
-        // SDK Packet Builder Helper
-        function createPacket(command, payload) {
+        // Standard Universal Packet Builder Frame
+        function buildPacket(command, payload) {
             let pkt = [0x51, 0x78, command, 0x00];
             let len = payload.length;
             pkt.push(len & 0xFF, (len >> 8) & 0xFF);
@@ -142,7 +143,7 @@
             return new Uint8Array(pkt);
         }
 
-        // 3. SDK-Style Image Capture and Printing Pipeline
+        // 3. Image Capture & Printing Pipeline
         async function snapAndPrint() {
             if (!pCharacteristic) return;
             
@@ -150,7 +151,7 @@
             const canvas = document.getElementById('canvas');
             const ctx = canvas.getContext('2d');
 
-            const targetWidth = 384; // Standard thermal paper width
+            const targetWidth = 384; 
             const scale = targetWidth / video.videoWidth;
             const targetHeight = Math.floor(video.videoHeight * scale);
 
@@ -161,12 +162,12 @@
             const imgData = ctx.getImageData(0, 0, targetWidth, targetHeight);
             const data = imgData.data;
 
-            document.getElementById('status').innerText = "Processing image (Threshold Dithering)...";
+            document.getElementById('status').innerText = "Processing image...";
 
             let bytesPerLine = Math.ceil(targetWidth / 8);
             let scanlines = [];
 
-            // High-contrast conversion loop
+            // Convert to clean high-contrast monochrome pixels
             for (let y = 0; y < targetHeight; y++) {
                 let rowBytes = new Uint8Array(bytesPerLine);
                 for (let xByte = 0; xByte < bytesPerLine; xByte++) {
@@ -175,14 +176,8 @@
                         let pxX = xByte * 8 + bit;
                         if (pxX < targetWidth) {
                             let offset = (y * targetWidth + pxX) * 4;
-                            // Grayscale calculation with high contrast push
-                            let r = data[offset];
-                            let g = data[offset + 1];
-                            let b = data[offset + 2];
-                            let gray = 0.299 * r + 0.587 * g + 0.114 * b;
-                            
-                            // If darker than threshold (140 for better contrast on camera shots), set bit
-                            if (gray < 140) {
+                            let gray = 0.299 * data[offset] + 0.587 * data[offset + 1] + 0.114 * data[offset + 2];
+                            if (gray < 130) {
                                 byte |= (1 << (7 - bit));
                             }
                         }
@@ -193,21 +188,21 @@
             }
 
             try {
-                document.getElementById('status').innerText = "Sending initialization...";
+                document.getElementById('status').innerText = "Initializing print head...";
                 
-                // Initialize printer settings matching SDK config
-                await pCharacteristic.writeValue(createPacket(0xA4, [0x35])); // Quality
-                await new Promise(r => setTimeout(r, 40));
-                await pCharacteristic.writeValue(createPacket(0xAF, [0x00, 0x70])); // Energy/Darkness
-                await new Promise(r => setTimeout(r, 40));
-                await pCharacteristic.writeValue(createPacket(0xBE, [0x00])); // Start print mode
-                await new Promise(r => setTimeout(r, 60));
+                // Send standard open-source initialization payload sequence
+                await pCharacteristic.writeValue(buildPacket(0xA4, [0x35]));
+                await new Promise(r => setTimeout(r, 30));
+                await pCharacteristic.writeValue(buildPacket(0xAF, [0x00, 0x60]));
+                await new Promise(r => setTimeout(r, 30));
+                await pCharacteristic.writeValue(buildPacket(0xBE, [0x00]));
+                await new Promise(r => setTimeout(r, 50));
 
-                document.getElementById('status').innerText = "Printing lines...";
+                document.getElementById('status').innerText = "Sending image lines...";
 
-                // Send data line-by-line using command 0xA2 with safe buffer pacing
+                // Stream scanlines with safe chunk pacing
                 for (let i = 0; i < scanlines.length; i++) {
-                    let packet = createPacket(0xA2, Array.from(scanlines[i]));
+                    let packet = buildPacket(0xA2, Array.from(scanlines[i]));
                     
                     if (pCharacteristic.properties.writeWithoutResponse) {
                         await pCharacteristic.writeValueWithoutResponse(packet);
@@ -215,17 +210,17 @@
                         await pCharacteristic.writeValue(packet);
                     }
 
-                    // Pacing delay to avoid buffer overflow on hardware
-                    await new Promise(r => setTimeout(r, 12));
+                    // Pacing delay to avoid buffer choke
+                    await new Promise(r => setTimeout(r, 10));
 
-                    if (i % 30 === 0) {
+                    if (i % 40 === 0) {
                         document.getElementById('status').innerText = `Printing line ${i}/${targetHeight}...`;
                     }
                 }
 
-                // Finish and feed paper out of the cutter slot
+                // Final paper feed command to push paper out
                 await new Promise(r => setTimeout(r, 100));
-                await pCharacteristic.writeValue(createPacket(0xBD, [0x50, 0x00]));
+                await pCharacteristic.writeValue(buildPacket(0xBD, [0x40, 0x00]));
 
                 document.getElementById('status').innerText = "Print complete! 🎉";
             } catch (err) {
